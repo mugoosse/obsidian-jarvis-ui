@@ -39,7 +39,11 @@ let tierMap = new Map<string, 'regular' | 'supernode' | 'ultranode'>()
 let tickCount = 0
 let tickRunning = false
 let stableFrameCount = 0  // consecutive frames with mean delta < 0.5 (natural layout early-exit)
-const MAX_TICKS = 200   // 300→200: practical convergence happens well before 300 ticks
+// --- Timing instrumentation (enabled via init {enableTimingLogs:true}) ---
+let timingEnabled = false
+let lastPostTime = 0
+const timingLogIntervalTick = 1  // emit timing message every N ticks when enabled
+const MAX_TICKS = 120   // 200→120: early-exit + faster decay converges <100 ticks for natural
 const ALPHA_MIN = 0.001 // early-exit threshold
 let graphShape: 'sun' | 'saturn' | 'milkyway' | 'brain' | 'natural' | 'tagboxes' = 'natural'
 let currentSpread = 2.0
@@ -401,9 +405,11 @@ function runTick() {
   // This eliminates pause-resume stutter by keeping the main thread's RAF loop
   // in continuous motion with fresh target positions.
   const POSTING_RATE = 1  // Post every 1 tick (was: implicit 5-10 via frame budget)
-  
+
+  const tickStartTime = timingEnabled ? performance.now() : 0
   // Run just ONE tick per callback (don't batch within frame budget)
   simulation.tick()
+  const simTickDuration = timingEnabled ? performance.now() - tickStartTime : 0
   tickCount++
 
   // Early-exit for natural layout: if nodes are visually stable, no need to wait for alpha decay
@@ -430,6 +436,8 @@ function runTick() {
   if (tickCount % POSTING_RATE === 0) {
     const currentAlpha = simulation.alpha()
     const done = tickCount >= MAX_TICKS || currentAlpha < ALPHA_MIN
+    const prePostTime = timingEnabled ? performance.now() : 0
+    const intervalSinceLastPost = timingEnabled && lastPostTime > 0 ? prePostTime - lastPostTime : 0
     self.postMessage({
       type: done ? 'end' : 'tick',
       nodes: getNodePositions(simNodes),
@@ -438,7 +446,25 @@ function runTick() {
       firstTick: tickCount <= 5,
       tagBoxes: graphShape === 'tagboxes' ? tagBoxesList : undefined,
       timestamp: performance.now(),
+      simTickDuration: timingEnabled ? simTickDuration : undefined,
+      intervalSinceLastPost: timingEnabled ? intervalSinceLastPost : undefined,
     })
+
+    if (timingEnabled) {
+      lastPostTime = prePostTime
+      // Emit a dedicated timing event every N ticks for the main thread to log
+      if (tickCount % timingLogIntervalTick === 0) {
+        self.postMessage({
+          type: 'timing',
+          tickCount,
+          simTickDuration,
+          intervalSinceLastPost,
+          alpha: currentAlpha,
+          shape: graphShape,
+          timestamp: prePostTime,
+        })
+      }
+    }
 
     if (done) {
       tickRunning = false
@@ -570,6 +596,7 @@ self.onmessage = (e: MessageEvent) => {
     if (e.data.spread != null) currentSpread = e.data.spread
     if (e.data.topN != null) tagBoxTopN = e.data.topN as number
     if (e.data.tagBoxSizeScale != null) tagBoxSizeScale = e.data.tagBoxSizeScale as number
+    if (e.data.enableTimingLogs) { timingEnabled = true; lastPostTime = 0 }
 
     // Warm restart: if existing positions are provided (shape-only change), reuse them
     // so nodes start near their previous locations instead of random scatter
@@ -1189,7 +1216,7 @@ self.onmessage = (e: MessageEvent) => {
         .strength(isShapeDriven ? 0 : 0.5))
       .force('charge', graphShape === 'natural'
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ? forceManyBody().strength(naturalChargeStrength as any)
+        ? forceManyBody().strength(naturalChargeStrength as any).theta(0.92).distanceMax(220)
         : forceManyBody().strength(chargeStrength))
       .force('center', forceCenter(0, 0, 0).strength(centerStrength))
       .force('collide', isShapeDriven ? null : forceCollide(12))
@@ -1197,8 +1224,8 @@ self.onmessage = (e: MessageEvent) => {
       .force('isolated', isolatedForce as any)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .force('shape', shapeForce as any)
-      .alphaDecay(graphShape === 'natural' ? 0.055 : 0.07)
-      .velocityDecay(0.45)
+      .alphaDecay(graphShape === 'natural' ? 0.065 : 0.07)
+      .velocityDecay(graphShape === 'natural' ? 0.55 : 0.45)
       .stop()
 
     runTick()
