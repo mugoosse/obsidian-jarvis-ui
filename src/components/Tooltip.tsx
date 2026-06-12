@@ -9,6 +9,13 @@ interface TooltipProps {
   y: number
 }
 
+function formatDateTime(iso: string): string {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
 export function Tooltip({ node, x, y }: TooltipProps) {
   if (!node) return null
 
@@ -55,6 +62,11 @@ export function Tooltip({ node, x, y }: TooltipProps) {
       {node.tags.length > 0 && (
         <div style={{ marginTop: 4, color: '#a6e3a1', fontSize: 11 }}>
           {node.tags.slice(0, 4).map(t => `#${t}`).join(' ')}
+        </div>
+      )}
+      {formatDateTime(node.createdAt || node.modifiedAt) && (
+        <div style={{ marginTop: 4, color: '#7f849c', fontSize: 11 }}>
+          {formatDateTime(node.createdAt || node.modifiedAt)}
         </div>
       )}
     </div>
