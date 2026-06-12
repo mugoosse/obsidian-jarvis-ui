@@ -61,6 +61,39 @@ export function useVaultGraph(enabled = true) {
 
     let active = true
     let pollTimer: ReturnType<typeof setTimeout> | null = null
+    let versionTimer: ReturnType<typeof setTimeout> | null = null
+    let lastGraphVersion: number | null = null
+
+    // Live vault updates: the server bumps graphVersion whenever its watcher
+    // rebuilds after a note add/remove/edit. Polling it lets an open UI pick up
+    // the new graph; useForce3D then warm-relaxes the pattern in real time.
+    async function pollGraphVersion(): Promise<void> {
+      if (!active) return
+      try {
+        const res = await fetch('/api/graph/status')
+        if (!active) return
+        if (res.ok) {
+          const s = await res.json() as { status: string; graphVersion?: number }
+          if (s.status === 'ready' && typeof s.graphVersion === 'number') {
+            if (lastGraphVersion === null) {
+              lastGraphVersion = s.graphVersion
+            } else if (s.graphVersion !== lastGraphVersion) {
+              lastGraphVersion = s.graphVersion
+              console.debug(`[useVaultGraph] vault changed (v${s.graphVersion}) — refetching graph`)
+              const r = await fetch('/api/graph')
+              if (!active) return
+              if (r.status === 200) {
+                const graph = await r.json() as GraphData
+                if (active) setData(graph)
+              }
+            }
+          }
+        }
+      } catch {
+        // Server busy — keep polling
+      }
+      if (active) versionTimer = setTimeout(pollGraphVersion, 4000)
+    }
 
     async function pollEmbeddings(): Promise<void> {
       if (!active) return
@@ -115,6 +148,8 @@ export function useVaultGraph(enabled = true) {
             setLoading(false)
             // Poll embeddings in background (only needed for semantic search)
             pollEmbeddings()
+            // Watch for vault changes so the pattern reflows live
+            pollGraphVersion()
           }
           return
         }
@@ -139,6 +174,7 @@ export function useVaultGraph(enabled = true) {
     return () => {
       active = false
       if (pollTimer !== null) clearTimeout(pollTimer)
+      if (versionTimer !== null) clearTimeout(versionTimer)
     }
   }, [enabled])
 

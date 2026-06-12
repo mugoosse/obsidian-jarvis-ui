@@ -141,6 +141,7 @@ interface NoteDoc {
 let cachedGraph: GraphData | null = null
 let cacheTime = 0
 let cachedVaultPath: string | null = null
+let graphVersion = 0 // bumped on every completed build — clients poll this to detect vault changes
 let searchIndex: MiniSearch<NoteDoc> | null = null
 let noteBodyMap = new Map<string, string>()
 const CACHE_TTL = 5 * 60_000 // 5 min — async builds are triggered explicitly
@@ -179,6 +180,42 @@ function handleWorkerFailure(vaultPath: string): void {
   setTimeout(() => startGraphBuild(vaultPath), delay)
 }
 
+// ─── Vault watcher: rebuild the graph when notes are added/removed/edited ────
+// Clients poll /api/graph/status and refetch when graphVersion moves, so an open
+// UI reflows the pattern in near-real-time after a vault change.
+let vaultWatcher: fs.FSWatcher | null = null
+let rebuildTimer: ReturnType<typeof setTimeout> | null = null
+
+function watchVault(vaultPath: string): void {
+  vaultWatcher?.close()
+  vaultWatcher = null
+  const scheduleRebuild = () => {
+    if (rebuildTimer) clearTimeout(rebuildTimer)
+    rebuildTimer = setTimeout(() => {
+      rebuildTimer = null
+      if (buildState.status === 'building') {
+        scheduleRebuild() // build in flight — check again shortly
+        return
+      }
+      console.log('[vault-watch] note change detected — rebuilding graph')
+      cacheTime = 0 // invalidate so /api/graph serves the new build when done
+      startGraphBuild(vaultPath)
+    }, 1500)
+  }
+  try {
+    // Note: recursive fs.watch does not follow directory symlinks — changes inside
+    // symlinked vault subdirs won't auto-trigger (full rebuild still happens on restart)
+    vaultWatcher = fs.watch(vaultPath, { recursive: true }, (_event, filename) => {
+      if (!filename || !filename.endsWith('.md')) return
+      if (filename.startsWith('.obsidian')) return
+      scheduleRebuild()
+    })
+    console.log(`[vault-watch] watching ${vaultPath} for note changes`)
+  } catch (err) {
+    console.warn(`[vault-watch] unavailable (${String(err)}) — live vault updates disabled`)
+  }
+}
+
 function startGraphBuild(vaultPath: string): void {
   if (buildState.status === 'building') return
 
@@ -202,6 +239,7 @@ function startGraphBuild(vaultPath: string): void {
       cachedGraph = msg.graph
       cacheTime = Date.now()
       cachedVaultPath = vaultPath
+      graphVersion++
       noteBodyMap = new Map(msg.noteBodyMap)
       buildSearchIndex(cachedGraph.nodes)
       buildState.status = 'ready'
@@ -306,6 +344,7 @@ app.post('/api/config', (req, res) => {
       activeWorker = null
     }
     resetEmbeddingIndex()
+    watchVault(trimmed)
     res.json({ ok: true })
   } catch (err) {
     res.status(500).json({ error: String(err) })
@@ -385,6 +424,7 @@ app.get('/api/graph/status', (_req, res) => {
     cached: cachedGraph !== null,
     nodeCount: cachedGraph?.nodes.length ?? 0,
     linkCount: cachedGraph?.links.length ?? 0,
+    graphVersion,
   })
 })
 
@@ -567,6 +607,7 @@ app.listen(PORT, () => {
   console.log(`Config: ${isConfigured() ? CONFIG_PATH : '(none — using fallback)'}`)
 
   startGraphBuild(cfg.vaultPath)
+  watchVault(cfg.vaultPath)
 })
 
 export default app

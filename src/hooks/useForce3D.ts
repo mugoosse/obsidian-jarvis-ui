@@ -51,6 +51,9 @@ export function useForce3D(graphData: GraphData | null, graphShape: 'sun' | 'sat
   const [positions, setPositions] = useState<Map<string, NodePosition>>(new Map())
   const [simDone, setSimDone] = useState(false)
   const [tagBoxes, setTagBoxes] = useState<TagBox[]>([])
+  // Natural precalc progress (0-100) while the worker silently solves the core
+  // layout; null whenever no precalc is running
+  const [layoutProgress, setLayoutProgress] = useState<number | null>(null)
   const workerRef = useRef<Worker | null>(null)
 
   // Track current spread so worker init can use it (not stale default)
@@ -105,6 +108,11 @@ export function useForce3D(graphData: GraphData | null, graphShape: 'sun' | 'sat
 
       if (type === 'tagBoxes') {
         setTagBoxes(e.data.tagBoxes ?? [])
+        return
+      }
+
+      if (type === 'layoutProgress') {
+        setLayoutProgress(typeof e.data.pct === 'number' ? e.data.pct : null)
         return
       }
 
@@ -183,19 +191,23 @@ export function useForce3D(graphData: GraphData | null, graphShape: 'sun' | 'sat
         // simDone fires immediately (clears patternLoading promptly)
         if (type === 'end') {
           setSimDone(true)
+          setLayoutProgress(null)
         }
       }
     }
 
-    // Warm restart: pass existing positions for shape-only changes so nodes start near
-    // their current locations rather than random scatter → visual convergence much faster
+    // Warm restart: pass existing positions whenever we have them. On shape-only
+    // changes nodes start near their current locations; on data changes (note
+    // add/remove) the worker uses coverage to warm-relax in real time instead of
+    // recomputing the whole layout from scratch.
     const live0 = livePositionsRef.current
-    const existingPositions = isShapeOnlyChange && live0.arr && live0.arr.length === live0.ids.length * 3
+    const existingPositions = live0.arr && live0.ids.length > 0 && live0.arr.length === live0.ids.length * 3
       ? live0.ids.map((id, i) => ({ id, x: live0.arr![i * 3], y: live0.arr![i * 3 + 1], z: live0.arr![i * 3 + 2] }))
       : undefined
 
     if (DEBUG) performance.mark('t1-worker-init-send')
 
+    setLayoutProgress(null)
     worker.postMessage({
       type: 'init',
       nodes: graphData.nodes.map((n: GraphNode) => ({ id: n.id, folder: n.folder ?? '', tags: n.tags ?? [] })),
@@ -205,6 +217,7 @@ export function useForce3D(graphData: GraphData | null, graphShape: 'sun' | 'sat
       })),
       graphShape,
       existingPositions,
+      reason: isShapeOnlyChange ? 'shape' : 'data',
       spread: spreadRef.current,
       topN: topNTags ?? 24,
       tagBoxSizeScale: tagBoxSizeScale ?? 1.0,
@@ -246,5 +259,5 @@ export function useForce3D(graphData: GraphData | null, graphShape: 'sun' | 'sat
     workerRef.current?.postMessage({ type: 'resetPins' })
   }, [])
 
-  return { positions, livePositions: livePositionsRef, simDone, tagBoxes, reheat, setSpread, setFilter, pinNodes, moveNodes, unpinNodes, resetPins, perfRef }
+  return { positions, livePositions: livePositionsRef, simDone, tagBoxes, layoutProgress, reheat, setSpread, setFilter, pinNodes, moveNodes, unpinNodes, resetPins, perfRef }
 }

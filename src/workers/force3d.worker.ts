@@ -38,6 +38,7 @@ let simNodes: WorkerNode[] = []
 let tierMap = new Map<string, 'regular' | 'supernode' | 'ultranode'>()
 let tickCount = 0
 let tickRunning = false
+let initGeneration = 0 // bumped per init; stale precalc chunk loops abort when it moves
 let stableFrameCount = 0  // consecutive frames with mean delta < 0.5 (natural layout early-exit)
 const MAX_TICKS = 200   // 300→200: practical convergence happens well before 300 ticks
 const ALPHA_MIN = 0.001 // early-exit threshold
@@ -583,6 +584,7 @@ self.onmessage = (e: MessageEvent) => {
   }
 
   if (type === 'init') {
+    initGeneration++
     tickRunning = false
     tickCount = 0
     stableFrameCount = 0
@@ -1229,7 +1231,143 @@ self.onmessage = (e: MessageEvent) => {
       tiers: simNodes.map(n => tierMap.get(n.id) ?? 'regular'),
     })
 
-    runTick()
+    // ── Natural precalc: solve a degree-≥2 core silently, attach leaves/orphans
+    // analytically, hand the renderer one final frame. 70% of vault nodes are
+    // deg-≤1 and contribute nothing to cluster topology, but each costs O(log n)
+    // in Barnes-Hut every tick — solving only the core cuts tick cost ~5×, and
+    // skipping per-tick postMessage/render churn removes the settle-phase stutter
+    // entirely. Graph3D's LERP_FACTOR glide animates the morph to the final frame,
+    // same as the analytic shapes. Interactions (drag/reheat/filter/add/remove)
+    // still stream per tick on the full simulation, exactly as before.
+    function startNaturalPrecalc() {
+      const gen = initGeneration
+      tickRunning = true // defers moveNodes/reheat/filter runTick() starts until the final frame exists
+
+      const coreIdSet = new Set<string>()
+      for (const id of allNodeIds) {
+        if ((degreeMap.get(id) ?? 0) >= 2 && find(id) === largestRoot) coreIdSet.add(id)
+      }
+      let coreNodes = simNodes.filter(n => coreIdSet.has(n.id))
+      if (coreNodes.length < 50) {
+        // degenerate/tiny vault — just solve everything silently
+        coreNodes = simNodes
+        for (const n of simNodes) coreIdSet.add(n.id)
+      }
+      const coreLinks: WorkerLink[] = (links ?? [])
+        .filter(l => coreIdSet.has(l.source) && coreIdSet.has(l.target))
+        .map(l => ({ source: l.source, target: l.target }))
+
+      // Same forces as the interactive natural sim minus collide (~24% of tick
+      // cost, invisible in the final frame at vault scale)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const coreSim = forceSimulation(coreNodes as any, 3)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .force('link', forceLink(coreLinks as any).id((d: unknown) => (d as WorkerNode).id).distance(60).strength(0.5))
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .force('charge', forceManyBody().strength(naturalChargeStrength as any))
+        .force('center', forceCenter(0, 0, 0).strength(0.05))
+        .alphaDecay(0.055)
+        .velocityDecay(0.45)
+        .stop()
+
+      const EST_TICKS = 70 // typical early-exit point; progress % is cosmetic
+      let pTicks = 0
+      let pStable = 0
+
+      const finishPrecalc = () => {
+        // BFS-attach: every unplaced node linked to a placed one sits beside it
+        const placed = new Set(coreIdSet)
+        const nodeById = new Map(simNodes.map(n => [n.id, n]))
+        let frontier = allNodeIds.filter(id => !placed.has(id) && (adjacencyMap.get(id) ?? []).some(m => placed.has(m)))
+        while (frontier.length > 0) {
+          for (const id of frontier) {
+            const anchorId = (adjacencyMap.get(id) ?? []).find(m => placed.has(m))
+            const a = anchorId ? nodeById.get(anchorId) : undefined
+            const n = nodeById.get(id)
+            if (!a || !n) { placed.add(id); continue }
+            const r = 45 + Math.random() * 35
+            const th = Math.random() * 2 * Math.PI
+            const ph = Math.acos(2 * Math.random() - 1)
+            n.x = (a.x ?? 0) + r * Math.sin(ph) * Math.cos(th)
+            n.y = (a.y ?? 0) + r * Math.sin(ph) * Math.sin(th)
+            n.z = (a.z ?? 0) + r * Math.cos(ph)
+            placed.add(id)
+          }
+          frontier = allNodeIds.filter(id => !placed.has(id) && (adjacencyMap.get(id) ?? []).some(m => placed.has(m)))
+        }
+        // Isolated sub-clusters + orphans: central gaussian ball — the same
+        // equilibrium isolatedForce(0.08) + repulsion settle into when simulated
+        for (const id of allNodeIds) {
+          if (placed.has(id)) continue
+          const n = nodeById.get(id)
+          if (!n) continue
+          const g = () => (Math.random() + Math.random() + Math.random() - 1.5) * 110
+          n.x = g(); n.y = g(); n.z = g()
+        }
+        // Rest state; the full interactive simulation takes over from here
+        for (const n of simNodes) { n.vx = 0; n.vy = 0; (n as WorkerNode & { vz?: number }).vz = 0 }
+        simulation?.alpha(0)
+        tickCount = pTicks
+        tickRunning = false
+        const positions = packPositions()
+        post({ type: 'end', positions, tickCount, tagBoxes: tagBoxesList, timestamp: performance.now() }, [positions.buffer])
+      }
+
+      const chunkLoop = () => {
+        if (gen !== initGeneration) return // superseded by a newer init
+        const sliceStart = performance.now()
+        let done = false
+        for (;;) {
+          if (pTicks >= MAX_TICKS || coreSim.alpha() < ALPHA_MIN) { done = true; break }
+          coreSim.tick()
+          pTicks++
+          let total = 0
+          for (const n of coreNodes) {
+            const vx = n.vx ?? 0, vy = n.vy ?? 0, vz = (n as WorkerNode & { vz?: number }).vz ?? 0
+            total += Math.sqrt(vx * vx + vy * vy + vz * vz)
+          }
+          if (total / coreNodes.length < 0.5) {
+            if (++pStable >= 3) { done = true; break }
+          } else pStable = 0
+          if (performance.now() - sliceStart > 250) break // yield so terminate/init messages stay responsive
+        }
+        post({ type: 'layoutProgress', pct: done ? 100 : Math.min(95, Math.round((pTicks / EST_TICKS) * 100)) })
+        if (!done) { setTimeout(chunkLoop, 0); return }
+        finishPrecalc()
+      }
+
+      post({ type: 'layoutProgress', pct: 0 })
+      setTimeout(chunkLoop, 0)
+    }
+
+    const initReason = (e.data as { reason?: 'shape' | 'data' }).reason ?? 'data'
+    const warmCount = warmPositions.size > 0
+      ? simNodes.reduce((c, n) => c + (warmPositions.has(n.id) ? 1 : 0), 0)
+      : 0
+    const warmCoverage = simNodes.length > 0 ? warmCount / simNodes.length : 0
+
+    if (graphShape === 'natural' && (initReason === 'shape' || warmCoverage < 0.9)) {
+      // Cold start or shape switch into natural → silent precalc + one-shot final frame
+      startNaturalPrecalc()
+    } else {
+      if (graphShape === 'natural' && warmCoverage >= 0.9) {
+        // Incremental data change (note add/remove): anchor new nodes beside an
+        // already-placed linked neighbour, then relax gently — streamed per tick
+        // so the pattern reflows in real time
+        for (const n of simNodes) {
+          if (warmPositions.has(n.id)) continue
+          const anchorId = (adjacencyMap.get(n.id) ?? []).find(id => warmPositions.has(id))
+          const a = anchorId ? warmPositions.get(anchorId) : undefined
+          if (a) {
+            n.x = a.x + (Math.random() - 0.5) * 80
+            n.y = a.y + (Math.random() - 0.5) * 80
+            n.z = a.z + (Math.random() - 0.5) * 80
+          }
+        }
+        simulation.alpha(0.25)
+      }
+      runTick()
+    }
   } else if (type === 'setSpread') {
     const spread = (e.data as { spread?: number }).spread ?? 1.0
     currentSpread = spread  // shape targets scale with spread

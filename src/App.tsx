@@ -119,7 +119,7 @@ function App() {
   })
   const [tagBoxTopN, setTagBoxTopN] = useState(2)
   const [tagBoxSizeScale, setTagBoxSizeScale] = useState(2.0)
-  const { positions, livePositions, simDone, tagBoxes, reheat, setSpread, setFilter, pinNodes, moveNodes, unpinNodes, resetPins, perfRef } = useForce3D(graphData, graphShape, tagBoxTopN, tagBoxSizeScale)
+  const { positions, livePositions, simDone, tagBoxes, layoutProgress, reheat, setSpread, setFilter, pinNodes, moveNodes, unpinNodes, resetPins, perfRef } = useForce3D(graphData, graphShape, tagBoxTopN, tagBoxSizeScale)
   const { animate: animateElectron, cancel: cancelElectron } = useElectron()
   const history = useHistory()
   const { presets, save: savePreset, remove: removePreset, load: loadPreset } = usePresets()
@@ -876,7 +876,7 @@ function App() {
         linkCount={graphData.links.length}
         visibleNodeCount={visibleCount}
         simDone={simDone}
-        breadcrumb={patternLoading ? '◌ RECALCULATING...' : focusMode ? `[H] FOCUS LOCKED (${focusLockedNodeIds?.size ?? 0} nodes)` : navBreadcrumb}
+        breadcrumb={layoutProgress !== null ? `◌ COMPUTING LAYOUT ${layoutProgress}%` : patternLoading ? '◌ RECALCULATING...' : focusMode ? `[H] FOCUS LOCKED (${focusLockedNodeIds?.size ?? 0} nodes)` : navBreadcrumb}
         timelapsePlaying={timelapsePlaying}
         timelapseDate={timelapseDate}
         onPauseTimelapse={() => setTimelapsePlaying(false)}
