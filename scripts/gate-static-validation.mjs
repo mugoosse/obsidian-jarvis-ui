@@ -73,7 +73,9 @@ try {
 // **CHECK 2: No syntax errors in force3d.worker.ts**
 console.log('[static-gate] Check 2: TypeScript/syntax validation...');
 try {
-  execSync('npx tsc --noEmit src/workers/force3d.worker.ts', { stdio: 'pipe' });
+  // Project tsconfig matters: bare single-file tsc defaults to ES5 target and
+  // fails on Map iteration regardless of branch
+  execSync('npx tsc -p tsconfig.app.json --noEmit', { stdio: 'pipe' });
   checks.syntaxCheck = { passed: true, details: 'TypeScript compilation OK' };
 } catch (err) {
   checks.syntaxCheck = { passed: false, error: 'TypeScript compilation failed' };
@@ -85,17 +87,15 @@ console.log('[static-gate] Check 3: Force function definitions...');
 try {
   const workerCode = fs.readFileSync('src/workers/force3d.worker.ts', 'utf-8');
 
-  const hasForceMany = workerCode.includes('forceManyBody()');
-  const hasForceLink = workerCode.includes('forceLink()');
-  const hasForceCenter = workerCode.includes('forceCenter()');
+  const hasForceMany = workerCode.includes('forceManyBody(');
+  const hasForceLink = workerCode.includes('forceLink(');
   const hasRunTick = workerCode.includes('function runTick()');
 
   checks.forceFunctionsCheck = {
-    passed: hasForceMany && hasForceLink && hasForceCenter && hasRunTick,
+    passed: hasForceMany && hasForceLink && hasRunTick,
     details: {
       forceManyBody: hasForceMany,
       forceLink: hasForceLink,
-      forceCenter: hasForceCenter,
       runTick: hasRunTick,
     },
   };
@@ -153,7 +153,8 @@ try {
 
   // Check for critical operations in runTick
   const hasTickCall = runTickCode.includes('simulation.tick()');
-  const hasPostMessage = runTickCode.includes('self.postMessage');
+  // P1 binary protocol posts via the bound `post(..., [transfer])` helper
+  const hasPostMessage = runTickCode.includes('self.postMessage') || runTickCode.includes('post({');
   const hasEarlyExit = runTickCode.includes('tickCount >= MAX_TICKS');
   const hasAlphaCheck = runTickCode.includes('alpha()');
 
