@@ -1257,8 +1257,11 @@ self.onmessage = (e: MessageEvent) => {
         .filter(l => coreIdSet.has(l.source) && coreIdSet.has(l.target))
         .map(l => ({ source: l.source, target: l.target }))
 
-      // Same forces as the interactive natural sim minus collide (~24% of tick
-      // cost, invisible in the final frame at vault scale)
+      // Same forces as the interactive natural sim, two phases:
+      //   1. converge collide-free (collide jitter defers the velocity
+      //      early-exit and doubles settle time for zero visual gain)
+      //   2. exactly PHASE2_COLLIDE_TICKS collide ticks fluff the converged
+      //      clusters — overlap resolution needs only a dozen ticks
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const coreSim = forceSimulation(coreNodes as any, 3)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1269,6 +1272,9 @@ self.onmessage = (e: MessageEvent) => {
         .alphaDecay(0.055)
         .velocityDecay(0.45)
         .stop()
+      const PHASE2_COLLIDE_TICKS = 12
+      let phase = 1
+      let phase2Ticks = 0
 
       const EST_TICKS = 70 // typical early-exit point; progress % is cosmetic
       let pTicks = 0
@@ -1304,6 +1310,20 @@ self.onmessage = (e: MessageEvent) => {
           const g = () => (Math.random() + Math.random() + Math.random() - 1.5) * 110
           n.x = g(); n.y = g(); n.z = g()
         }
+        // Collision polish: a few collide-only ticks over the FULL node set so
+        // analytically-attached leaves and orphans get breathing room too. No
+        // charge/link forces, so the cluster layout itself doesn't move — only
+        // overlapping nodes nudge apart (~r12, tiny vs cluster scale).
+        post({ type: 'layoutProgress', pct: 97 })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const polishSim = forceSimulation(simNodes as any, 3)
+          .force('collide', forceCollide(12))
+          .velocityDecay(0.6)
+          .alpha(0.5)
+          .stop()
+        // 4 ticks resolve the bulk of r=12 overlaps; full-set octree ticks are
+        // the priciest part of the collide pass, so the budget stays tight
+        for (let i = 0; i < 4; i++) polishSim.tick()
         // Rest state; the full interactive simulation takes over from here
         for (const n of simNodes) { n.vx = 0; n.vy = 0; (n as WorkerNode & { vz?: number }).vz = 0 }
         simulation?.alpha(0)
@@ -1318,20 +1338,38 @@ self.onmessage = (e: MessageEvent) => {
         const sliceStart = performance.now()
         let done = false
         for (;;) {
-          if (pTicks >= MAX_TICKS || coreSim.alpha() < ALPHA_MIN) { done = true; break }
-          coreSim.tick()
-          pTicks++
-          let total = 0
-          for (const n of coreNodes) {
-            const vx = n.vx ?? 0, vy = n.vy ?? 0, vz = (n as WorkerNode & { vz?: number }).vz ?? 0
-            total += Math.sqrt(vx * vx + vy * vy + vz * vz)
+          if (phase === 1) {
+            if (pTicks >= MAX_TICKS || coreSim.alpha() < ALPHA_MIN) {
+              phase = 2
+              coreSim.force('collide', forceCollide(12))
+              continue
+            }
+            coreSim.tick()
+            pTicks++
+            let total = 0
+            for (const n of coreNodes) {
+              const vx = n.vx ?? 0, vy = n.vy ?? 0, vz = (n as WorkerNode & { vz?: number }).vz ?? 0
+              total += Math.sqrt(vx * vx + vy * vy + vz * vz)
+            }
+            if (total / coreNodes.length < 0.5) {
+              if (++pStable >= 3) {
+                phase = 2
+                coreSim.force('collide', forceCollide(12))
+              }
+            } else pStable = 0
+          } else {
+            // Phase 2: fixed collide budget on the converged layout
+            if (phase2Ticks >= PHASE2_COLLIDE_TICKS) { done = true; break }
+            coreSim.tick()
+            phase2Ticks++
+            pTicks++
           }
-          if (total / coreNodes.length < 0.5) {
-            if (++pStable >= 3) { done = true; break }
-          } else pStable = 0
           if (performance.now() - sliceStart > 250) break // yield so terminate/init messages stay responsive
         }
-        post({ type: 'layoutProgress', pct: done ? 100 : Math.min(95, Math.round((pTicks / EST_TICKS) * 100)) })
+        const pct = done ? 100 : phase === 2
+          ? Math.min(96, 88 + Math.round((phase2Ticks / PHASE2_COLLIDE_TICKS) * 8))
+          : Math.min(87, Math.round((pTicks / EST_TICKS) * 87))
+        post({ type: 'layoutProgress', pct })
         if (!done) { setTimeout(chunkLoop, 0); return }
         finishPrecalc()
       }
