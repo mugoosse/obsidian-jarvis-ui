@@ -158,10 +158,10 @@ function App() {
     try { const v = localStorage.getItem('jarvis-text-size'); return v ? parseFloat(v) : 1.0 } catch { return 1.0 }
   })
   const [minNodeSize, setMinNodeSize] = useState(1.0)
-  const [maxNodeSize, setMaxNodeSize] = useState(3.0)
+  const [maxNodeSize, setMaxNodeSize] = useState(1.5)
   const [ultraNodeSize, setUltraNodeSize] = useState(() => {
     const url = _urlParams.get('ultraNodeSize')
-    return url ? parseFloat(url) : 4.0
+    return url ? parseFloat(url) : 2.5
   })
   const [shortcutsVisible, setShortcutsVisible] = useState(() => {
     try { return localStorage.getItem('jarvis-shortcuts-open') !== 'false' } catch { return true }
@@ -619,8 +619,8 @@ function App() {
     setSpread(2.0)
     setNodeOpacity(1.0)
     setMinNodeSize(1.0)
-    setMaxNodeSize(3.0)
-    setUltraNodeSize(4.0)
+    setMaxNodeSize(1.5)
+    setUltraNodeSize(2.5)
     setTagIsolationIds(null)
     setTagIsolationTags([])
     setCollapsedNodes(new Set())
