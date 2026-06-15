@@ -8,6 +8,41 @@ import {
   forceCenter,
   forceCollide,
 } from 'd3-force-3d'
+import wasmUrl from './force_sim.wasm?url'
+
+// ── Rust/WASM natural-layout core (optional accelerator) ─────────────────────
+// Plain wasm (no wasm-bindgen): JS allocs buffers, writes f32/u32 arrays into
+// linear memory, calls run_core/run_polish, reads positions back. Loaded lazily;
+// any failure falls back to the d3-force-3d path so the graph never breaks.
+interface ForceWasm {
+  memory: WebAssembly.Memory
+  alloc(size: number): number
+  dealloc(ptr: number, size: number): void
+  run_core(
+    n: number, posPtr: number, chargePtr: number, m: number, linksPtr: number,
+    linkDistance: number, linkStrength: number, chargeDistMin2: number, theta2: number,
+    centerStrength: number, alphaDecay: number, velocityDecay: number,
+    maxTicks: number, alphaMin: number, earlyExitVel: number,
+    collideRadius: number, collideTicks: number,
+  ): number
+  run_polish(n: number, posPtr: number, radius: number, velocityDecay: number, iters: number): void
+}
+let wasmPromise: Promise<ForceWasm | null> | null = null
+function loadForceWasm(): Promise<ForceWasm | null> {
+  if (wasmPromise) return wasmPromise
+  wasmPromise = (async () => {
+    try {
+      const resp = await fetch(wasmUrl)
+      const { instance } = await WebAssembly.instantiate(await resp.arrayBuffer(), {})
+      const ex = instance.exports as unknown as ForceWasm
+      if (typeof ex.run_core !== 'function' || typeof ex.alloc !== 'function') return null
+      return ex
+    } catch {
+      return null // fall back to d3-force-3d
+    }
+  })()
+  return wasmPromise
+}
 
 // Low-poly brain mesh vertices (CC Attribution, Poly by Google) — 1035 surface points, unit scale
 // prettier-ignore
@@ -1257,30 +1292,42 @@ self.onmessage = (e: MessageEvent) => {
         .filter(l => coreIdSet.has(l.source) && coreIdSet.has(l.target))
         .map(l => ({ source: l.source, target: l.target }))
 
-      // Same forces as the interactive natural sim, two phases:
-      //   1. converge collide-free (collide jitter defers the velocity
-      //      early-exit and doubles settle time for zero visual gain)
-      //   2. exactly PHASE2_COLLIDE_TICKS collide ticks fluff the converged
-      //      clusters — overlap resolution needs only a dozen ticks
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const coreSim = forceSimulation(coreNodes as any, 3)
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .force('link', forceLink(coreLinks as any).id((d: unknown) => (d as WorkerNode).id).distance(60).strength(0.5))
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .force('charge', forceManyBody().strength(naturalChargeStrength as any))
-        .force('center', forceCenter(0, 0, 0).strength(0.05))
-        .alphaDecay(0.055)
-        .velocityDecay(0.45)
-        .stop()
       const PHASE2_COLLIDE_TICKS = 12
-      let phase = 1
-      let phase2Ticks = 0
-
       const EST_TICKS = 70 // typical early-exit point; progress % is cosmetic
       let pTicks = 0
-      let pStable = 0
 
-      const finishPrecalc = () => {
+      // Collide-only polish over the FULL node set so analytically-attached
+      // leaves/orphans get breathing room (no charge/link, so clusters don't move)
+      const polishFullSet = (wasm: ForceWasm | null) => {
+        const n = simNodes.length
+        if (wasm) {
+          const posPtr = wasm.alloc(n * 3 * 4)
+          const pv = new Float32Array(wasm.memory.buffer, posPtr, n * 3)
+          for (let i = 0; i < n; i++) {
+            pv[i * 3] = simNodes[i].x ?? 0
+            pv[i * 3 + 1] = simNodes[i].y ?? 0
+            pv[i * 3 + 2] = (simNodes[i] as WorkerNode & { z?: number }).z ?? 0
+          }
+          wasm.run_polish(n, posPtr, 12, 0.6, 4)
+          const out = new Float32Array(wasm.memory.buffer, posPtr, n * 3) // re-view: memory may have grown
+          for (let i = 0; i < n; i++) {
+            simNodes[i].x = out[i * 3]
+            simNodes[i].y = out[i * 3 + 1]
+            ;(simNodes[i] as WorkerNode & { z?: number }).z = out[i * 3 + 2]
+          }
+          wasm.dealloc(posPtr, n * 3 * 4)
+        } else {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const polishSim = forceSimulation(simNodes as any, 3)
+            .force('collide', forceCollide(12))
+            .velocityDecay(0.6)
+            .alpha(0.5)
+            .stop()
+          for (let i = 0; i < 4; i++) polishSim.tick()
+        }
+      }
+
+      const finishPrecalc = (wasm: ForceWasm | null) => {
         // BFS-attach: every unplaced node linked to a placed one sits beside it
         const placed = new Set(coreIdSet)
         const nodeById = new Map(simNodes.map(n => [n.id, n]))
@@ -1310,20 +1357,8 @@ self.onmessage = (e: MessageEvent) => {
           const g = () => (Math.random() + Math.random() + Math.random() - 1.5) * 110
           n.x = g(); n.y = g(); n.z = g()
         }
-        // Collision polish: a few collide-only ticks over the FULL node set so
-        // analytically-attached leaves and orphans get breathing room too. No
-        // charge/link forces, so the cluster layout itself doesn't move — only
-        // overlapping nodes nudge apart (~r12, tiny vs cluster scale).
         post({ type: 'layoutProgress', pct: 97 })
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const polishSim = forceSimulation(simNodes as any, 3)
-          .force('collide', forceCollide(12))
-          .velocityDecay(0.6)
-          .alpha(0.5)
-          .stop()
-        // 4 ticks resolve the bulk of r=12 overlaps; full-set octree ticks are
-        // the priciest part of the collide pass, so the budget stays tight
-        for (let i = 0; i < 4; i++) polishSim.tick()
+        polishFullSet(wasm)
         // Rest state; the full interactive simulation takes over from here
         for (const n of simNodes) { n.vx = 0; n.vy = 0; (n as WorkerNode & { vz?: number }).vz = 0 }
         simulation?.alpha(0)
@@ -1333,49 +1368,124 @@ self.onmessage = (e: MessageEvent) => {
         post({ type: 'end', positions, tickCount, tagBoxes: tagBoxesList, timestamp: performance.now() }, [positions.buffer])
       }
 
-      const chunkLoop = () => {
-        if (gen !== initGeneration) return // superseded by a newer init
-        const sliceStart = performance.now()
-        let done = false
-        for (;;) {
-          if (phase === 1) {
-            if (pTicks >= MAX_TICKS || coreSim.alpha() < ALPHA_MIN) {
-              phase = 2
-              coreSim.force('collide', forceCollide(12))
-              continue
-            }
-            coreSim.tick()
-            pTicks++
-            let total = 0
-            for (const n of coreNodes) {
-              const vx = n.vx ?? 0, vy = n.vy ?? 0, vz = (n as WorkerNode & { vz?: number }).vz ?? 0
-              total += Math.sqrt(vx * vx + vy * vy + vz * vz)
-            }
-            if (total / coreNodes.length < 0.5) {
-              if (++pStable >= 3) {
+      // ── WASM core path: one blocking solve off the main thread (~5× faster) ──
+      const runCoreWasm = (wasm: ForceWasm) => {
+        const n = coreNodes.length
+        const idxOf = new Map(coreNodes.map((nd, i) => [nd.id, i]))
+        // endpoints are still strings here (coreLinks never passed to d3 on this path)
+        const lid = (e: string | WorkerNode) => (typeof e === 'string' ? e : e.id)
+        const clinks = coreLinks.filter(l => idxOf.has(lid(l.source)) && idxOf.has(lid(l.target)))
+        const m = clinks.length
+        const posPtr = wasm.alloc(n * 3 * 4)
+        const chargePtr = wasm.alloc(n * 4)
+        const linksPtr = wasm.alloc(Math.max(1, m * 2) * 4)
+        const pv = new Float32Array(wasm.memory.buffer, posPtr, n * 3)
+        const cv = new Float32Array(wasm.memory.buffer, chargePtr, n)
+        for (let i = 0; i < n; i++) {
+          const nd = coreNodes[i]
+          pv[i * 3] = nd.x ?? 0
+          pv[i * 3 + 1] = nd.y ?? 0
+          pv[i * 3 + 2] = (nd as WorkerNode & { z?: number }).z ?? 0
+          cv[i] = naturalChargeStrength(nd)
+        }
+        if (m > 0) {
+          const lv = new Uint32Array(wasm.memory.buffer, linksPtr, m * 2)
+          for (let i = 0; i < m; i++) {
+            lv[i * 2] = idxOf.get(lid(clinks[i].source))!
+            lv[i * 2 + 1] = idxOf.get(lid(clinks[i].target))!
+          }
+        }
+        post({ type: 'layoutProgress', pct: 40 })
+        const packed = wasm.run_core(
+          n, posPtr, chargePtr, m, linksPtr,
+          60, 0.5, 1, 0.81, 0.05, 0.055, 0.45,
+          MAX_TICKS, ALPHA_MIN, 0.5, 12, PHASE2_COLLIDE_TICKS,
+        )
+        pTicks = packed & 0xFFFF
+        const out = new Float32Array(wasm.memory.buffer, posPtr, n * 3) // re-view: memory may have grown
+        for (let i = 0; i < n; i++) {
+          const nd = coreNodes[i]
+          nd.x = out[i * 3]
+          nd.y = out[i * 3 + 1]
+          ;(nd as WorkerNode & { z?: number }).z = out[i * 3 + 2]
+        }
+        wasm.dealloc(posPtr, n * 3 * 4)
+        wasm.dealloc(chargePtr, n * 4)
+        wasm.dealloc(linksPtr, Math.max(1, m * 2) * 4)
+      }
+
+      // ── d3 fallback: chunked two-phase core sim (collide-free → collide tail) ──
+      const runCoreD3 = () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const coreSim = forceSimulation(coreNodes as any, 3)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .force('link', forceLink(coreLinks as any).id((d: unknown) => (d as WorkerNode).id).distance(60).strength(0.5))
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .force('charge', forceManyBody().strength(naturalChargeStrength as any))
+          .force('center', forceCenter(0, 0, 0).strength(0.05))
+          .alphaDecay(0.055)
+          .velocityDecay(0.45)
+          .stop()
+        let phase = 1
+        let phase2Ticks = 0
+        let pStable = 0
+        const chunkLoop = () => {
+          if (gen !== initGeneration) return // superseded by a newer init
+          const sliceStart = performance.now()
+          let done = false
+          for (;;) {
+            if (phase === 1) {
+              if (pTicks >= MAX_TICKS || coreSim.alpha() < ALPHA_MIN) {
                 phase = 2
                 coreSim.force('collide', forceCollide(12))
+                continue
               }
-            } else pStable = 0
-          } else {
-            // Phase 2: fixed collide budget on the converged layout
-            if (phase2Ticks >= PHASE2_COLLIDE_TICKS) { done = true; break }
-            coreSim.tick()
-            phase2Ticks++
-            pTicks++
+              coreSim.tick()
+              pTicks++
+              let total = 0
+              for (const n of coreNodes) {
+                const vx = n.vx ?? 0, vy = n.vy ?? 0, vz = (n as WorkerNode & { vz?: number }).vz ?? 0
+                total += Math.sqrt(vx * vx + vy * vy + vz * vz)
+              }
+              if (total / coreNodes.length < 0.5) {
+                if (++pStable >= 3) {
+                  phase = 2
+                  coreSim.force('collide', forceCollide(12))
+                }
+              } else pStable = 0
+            } else {
+              if (phase2Ticks >= PHASE2_COLLIDE_TICKS) { done = true; break }
+              coreSim.tick()
+              phase2Ticks++
+              pTicks++
+            }
+            if (performance.now() - sliceStart > 250) break // yield so terminate/init messages stay responsive
           }
-          if (performance.now() - sliceStart > 250) break // yield so terminate/init messages stay responsive
+          const pct = done ? 96 : phase === 2
+            ? Math.min(96, 88 + Math.round((phase2Ticks / PHASE2_COLLIDE_TICKS) * 8))
+            : Math.min(87, Math.round((pTicks / EST_TICKS) * 87))
+          post({ type: 'layoutProgress', pct })
+          if (!done) { setTimeout(chunkLoop, 0); return }
+          finishPrecalc(null)
         }
-        const pct = done ? 100 : phase === 2
-          ? Math.min(96, 88 + Math.round((phase2Ticks / PHASE2_COLLIDE_TICKS) * 8))
-          : Math.min(87, Math.round((pTicks / EST_TICKS) * 87))
-        post({ type: 'layoutProgress', pct })
-        if (!done) { setTimeout(chunkLoop, 0); return }
-        finishPrecalc()
+        setTimeout(chunkLoop, 0)
       }
 
       post({ type: 'layoutProgress', pct: 0 })
-      setTimeout(chunkLoop, 0)
+      loadForceWasm().then(wasm => {
+        if (gen !== initGeneration) return // superseded while wasm loaded
+        if (wasm) {
+          console.log('[precalc-engine] wasm')
+          runCoreWasm(wasm)
+          if (gen !== initGeneration) return
+          finishPrecalc(wasm)
+        } else {
+          console.log('[precalc-engine] d3-fallback')
+          runCoreD3()
+        }
+      }).catch(() => {
+        if (gen === initGeneration) runCoreD3()
+      })
     }
 
     const initReason = (e.data as { reason?: 'shape' | 'data' }).reason ?? 'data'

@@ -15,3 +15,6 @@ brain-mesh.glb
 brain-vertices.json
 semantic-screenshot.js
 ultranode-screenshots.js
+
+# Rust/WASM build artifacts (prebuilt force_sim.wasm is committed in src/workers/)
+wasm/force-sim/target/
