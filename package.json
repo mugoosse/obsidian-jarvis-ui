@@ -5,14 +5,22 @@
   "author": "Prompt-Surfer <prompt-surfer@protonmail.com>",
   "license": "AGPL-3.0-only",
   "scripts": {
-    "dev": "concurrently \"npm run server\" \"vite\"",
-    "server": "tsx watch server/index.ts",
+    "dev": "concurrently \"bun run server\" \"vite\"",
+    "server": "bun --watch server/index.ts",
     "build": "tsc -p tsconfig.app.json && vite build",
     "lint": "eslint src server --ext .ts,.tsx --max-warnings 0",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"
   },
+  "trustedDependencies": [
+    "puppeteer",
+    "playwright",
+    "@playwright/test",
+    "esbuild",
+    "sharp",
+    "protobufjs"
+  ],
   "dependencies": {
     "@codemirror/lang-markdown": "^6.5.0",
     "@codemirror/state": "^6.5.4",

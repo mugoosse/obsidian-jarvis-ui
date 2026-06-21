@@ -4,8 +4,9 @@
 3D WebGL vault graph for Obsidian with Iron Man/Jarvis aesthetic.
 Built with: React 18, TypeScript, Three.js, Vite, Express.
 
+**Runtime:** Bun (1.3+). `bun install` for deps, `bun run <script>` for scripts. The server runs natively under Bun (no tsx) — `worker_threads`, recursive `fs.watch`, and `@xenova/transformers` (needs `sharp`, built via `trustedDependencies`) all verified working.
 **Vault:** Set via `VAULT_PATH` env var (e.g. `export VAULT_PATH=~/Documents/MyVault`)
-**Dev server:** `nohup npx tsx watch server/index.ts > /tmp/api.log 2>&1 &` + `nohup npx vite --host 0.0.0.0 > /tmp/vite.log 2>&1 &`
+**Dev server:** `nohup bun --watch server/index.ts > /tmp/api.log 2>&1 &` + `nohup bunx vite --host 0.0.0.0 > /tmp/vite.log 2>&1 &` (or just `bun run dev`)
 **Graph API:** `http://localhost:3001/api/graph`
 **UI:** `http://localhost:5173`
 
@@ -63,15 +64,15 @@ chore: bump Three.js to v0.172
 Before taking Playwright screenshots, ALWAYS restart the dev server to ensure you're testing the latest code:
 ```bash
 # Kill any running dev server
-pkill -f "vite" 2>/dev/null; pkill -f "tsx watch server" 2>/dev/null
+pkill -f "vite" 2>/dev/null; pkill -f "server/index.ts" 2>/dev/null
 sleep 2
 # Start fresh
-npm run dev &
+bun run dev &
 sleep 5  # wait for both vite + api server to start
 # THEN run playwright
-npx playwright test <test-file> --timeout 90000
+bunx playwright test <test-file> --timeout 90000
 # Kill after
-pkill -f "vite" 2>/dev/null; pkill -f "tsx watch server" 2>/dev/null
+pkill -f "vite" 2>/dev/null; pkill -f "server/index.ts" 2>/dev/null
 ```
 Never trust screenshots from a stale dev server. Rebuild + restart every time.
 

@@ -87,11 +87,11 @@ console.log('');
 try {
   // Start dev servers
   console.log('[gate] Starting dev servers...');
-  execSync('pkill -f "vite.*5173" 2>/dev/null; pkill -f "tsx.*server" 2>/dev/null; sleep 2', {
+  execSync('pkill -f "vite.*5173" 2>/dev/null; pkill -f "server/index.ts" 2>/dev/null; sleep 2', {
     stdio: 'pipe',
   });
   execSync(
-    'nohup npx tsx server/index.ts > /tmp/gate-api.log 2>&1 & nohup npx vite --host 127.0.0.1 --port 5173 > /tmp/gate-vite.log 2>&1 &',
+    'nohup bun server/index.ts > /tmp/gate-api.log 2>&1 & nohup bunx vite --host 127.0.0.1 --port 5173 > /tmp/gate-vite.log 2>&1 &',
     { stdio: 'pipe' }
   );
   execSync('sleep 10'); // Wait for servers to start

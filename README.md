@@ -84,20 +84,22 @@ Jarvis UI renders your entire Obsidian vault as a living, interactive 3D force-d
 
 ## Getting Started
 
+> **Runtime:** This project uses [Bun](https://bun.sh) (1.3+). The Express API server runs natively under Bun (no `tsx`).
+
 ```bash
 git clone <repo>
 cd obsidian-jarvis-ui
-npm install
+bun install
 
 # Set your vault path in .env:
 echo "VITE_VAULT_PATH=/path/to/your/obsidian/vault" > .env
 
-npm run dev
+bun run dev
 ```
 
 Then open http://localhost:5173.
 
-> **Note:** `npm run dev` starts both the Vite frontend and the Express API server concurrently. Both must be running — the API server reads your vault `.md` files and serves the graph JSON.
+> **Note:** `bun run dev` starts both the Vite frontend and the Express API server concurrently. Both must be running — the API server reads your vault `.md` files and serves the graph JSON.
 
 ---
 
